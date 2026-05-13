@@ -1,0 +1,17 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: place_intel_postgres
+    environment:
+      POSTGRES_DB: place_intel
+      POSTGRES_USER: place_user
+      POSTGRES_PASSWORD: place_password
+    ports:
+      - "5433:5432"
+    volumes:
+      - place_intel_pgdata:/var/lib/postgresql/data
+
+volumes:
+  place_intel_pgdata:
