@@ -1,0 +1,8 @@
+# This project uses Poetry for dependency management.
+# Main dependencies are defined in pyproject.toml.
+# To install dependencies, run:
+#
+# poetry install
+#
+# To export requirements later for deployment:
+# poetry export -f requirements.txt --output requirements.txt --without-hashes
