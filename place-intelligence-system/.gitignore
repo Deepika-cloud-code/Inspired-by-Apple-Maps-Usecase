@@ -1,0 +1,9 @@
+place-intelligence-system/data/
+place-intelligence-system/data/raw/
+data/
+data/raw/
+*.csv
+*.json
+*.zip
+*.parquet
+.env
