@@ -1,0 +1,23 @@
+dbt_place_intel:
+  target: local
+
+  outputs:
+    local:
+      type: postgres
+      host: 127.0.0.1
+      user: place_user
+      pass: place_password
+      port: 5433
+      dbname: place_intel
+      schema: public
+      threads: 4
+
+    docker:
+      type: postgres
+      host: postgres
+      user: place_user
+      pass: place_password
+      port: 5432
+      dbname: place_intel
+      schema: public
+      threads: 4

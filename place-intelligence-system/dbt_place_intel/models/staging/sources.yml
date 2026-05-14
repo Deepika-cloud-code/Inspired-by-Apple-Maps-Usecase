@@ -1,0 +1,19 @@
+version: 2
+
+sources:
+  - name: raw
+    database: place_intel
+    schema: public
+    description: "Raw source tables loaded into Postgres from CSV, GeoJSON, and JSON files."
+    tables:
+      - name: raw_business_license_history
+        description: "Historical Chicago business license records."
+
+      - name: raw_current_active_licenses
+        description: "Currently active Chicago business license records."
+
+      - name: raw_osm_places
+        description: "OpenStreetMap place and POI records from GeoJSON."
+
+      - name: raw_yelp_businesses
+        description: "Yelp business metadata records from JSON."
