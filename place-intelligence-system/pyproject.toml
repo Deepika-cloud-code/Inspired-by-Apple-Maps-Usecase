@@ -20,7 +20,9 @@ dependencies = [
     "chromadb (>=1.5.9,<2.0.0)",
     "langchain-openai (>=1.2.2,<2.0.0)",
     "sentence-transformers (>=5.5.1,<6.0.0)",
-    "langchain-huggingface (>=1.2.2,<2.0.0)"
+    "langchain-huggingface (>=1.2.2,<2.0.0)",
+    "groq (>=1.4.0,<2.0.0)",
+    "rank-bm25 (>=0.2.2,<0.3.0)"
 ]
 
 [tool.poetry]
