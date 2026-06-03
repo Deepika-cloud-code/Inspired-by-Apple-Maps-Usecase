@@ -889,34 +889,913 @@ The following dbt models are currently completed:
 | Staging | `stg_osm_places` | `raw_osm_places` |
 | Staging | `stg_yelp_businesses` | `raw_yelp_businesses` |
 
-The next planned step is to build the first intermediate dbt model:
+---
+
+# 14. Intermediate Layer Implementation
+
+After completing the staging layer, the next step was to create intermediate models.
+
+The purpose of the intermediate layer is to:
+
+- Clean and deduplicate records within each source
+- Preserve source-specific evidence columns
+- Standardize common matching fields
+- Prepare data for fuzzy matching and final marts
+
+The following intermediate models were created:
+
+| Model Name | Input Model | Purpose |
+|---|---|---|
+| `int_current_active_license_cleaned` | `stg_current_active_licenses` | Cleans and deduplicates current active Chicago license records |
+| `int_license_history_cleaned` | `stg_business_license_history` | Cleans and deduplicates historical license records |
+| `int_osm_places_cleaned` | `stg_osm_places` | Cleans and deduplicates OpenStreetMap POI records |
+| `int_yelp_businesses_cleaned` | `stg_yelp_businesses` | Cleans and deduplicates Yelp business records |
+| `int_all_place_sources` | All cleaned intermediate models | Combines all source evidence into one standardized evidence table |
+
+---
+
+# 15. Why Source-Specific Intermediate Models Were Created
+
+Initially, a single `UNION ALL` model was considered to combine all staging tables directly.
+
+However, that would have caused two problems:
+
+1. Duplicate records within each source would remain unresolved.
+2. Important source-specific fields could be lost when forcing all datasets into one common structure.
+
+For example:
+
+| Source | Important Source-Specific Evidence |
+|---|---|
+| Chicago Licenses | `license_status`, `business_activity`, `license_term_expiration_date`, `date_issued` |
+| OpenStreetMap | `amenity`, `shop`, `tourism`, `opening_hours`, `website`, `raw_geometry` |
+| Yelp | `stars`, `review_count`, `is_open`, `categories`, `hours`, `attributes` |
+
+Therefore, the pipeline first creates source-specific cleaned intermediate models and then combines them into a unified evidence table.
+
+The improved flow is:
+
+```text
+staging models
+   ↓
+source-specific cleaned intermediate models
+   ↓
+int_all_place_sources
+   ↓
+fuzzy matching
+   ↓
+clusters
+   ↓
+marts
+```
+
+---
+
+# 16. Unified Evidence Table: `int_all_place_sources`
+
+The model:
 
 ```text
 int_all_place_sources
 ```
 
-This model will combine all four staging models into one standardized place-source table.
+combines the cleaned intermediate models into one comparison-ready evidence table.
 
-The purpose of the intermediate model is to prepare the data for cross-source comparison.
-
-It will help detect:
-
-- Whether the same place exists across multiple sources
-- Whether a place is missing from one or more sources
-- Whether Yelp says closed while official licenses say active
-- Whether OSM has a different address than license/Yelp data
-- Whether a business may be duplicated
-- Whether a place may need human review
-
-Planned flow:
+It includes common fields such as:
 
 ```text
-stg_current_active_licenses
-stg_business_license_history
-stg_osm_places
-stg_yelp_businesses
-        ↓
-int_all_place_sources
-        ↓
-future marts for closure, relocation, duplicate, and confidence scoring
+source_system
+source_type
+source_record_id
+normalized_business_name
+normalized_address
+normalized_city
+normalized_state
+normalized_postal_code
+latitude
+longitude
+place_category
+source_says_active
+source_match_key
+source_specific_evidence
 ```
+
+The `source_specific_evidence` column is stored as JSONB. This allows the model to preserve important unique details from each dataset while still keeping a common structure for matching.
+
+Example:
+
+```text
+Chicago license row → license evidence stored in source_specific_evidence
+Yelp row → review/status evidence stored in source_specific_evidence
+OSM row → POI/geometry evidence stored in source_specific_evidence
+```
+
+This model acts as the central evidence table for downstream matching and RAG.
+
+---
+
+# 17. Fuzzy Matching Implementation
+
+Exact matching was not enough because different sources write business names and addresses differently.
+
+Example:
+
+```text
+10 n state st
+10 north state street
+10 N State Street
+```
+
+To solve this, PostgreSQL fuzzy matching was added using the `pg_trgm` extension.
+
+The extension was enabled using:
+
+```powershell
+docker exec -it place_intel_postgres psql -U place_user -d place_intel -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
+```
+
+The fuzzy matching model created was:
+
+```text
+int_place_fuzzy_match_candidates
+```
+
+This model compares Chicago current active license records against Yelp and OSM records using:
+
+```text
+business name similarity
+address similarity
+category similarity
+city/state/ZIP matching
+street number matching
+```
+
+Fuzzy match types include:
+
+| Match Type | Meaning |
+|---|---|
+| `strong_fuzzy_match` | Strong name and address similarity |
+| `medium_fuzzy_match` | Moderate name and address similarity |
+| `name_zip_match` | Strong name match with same ZIP |
+| `address_supported_match` | Address similarity supports the match |
+
+The model creates a weighted fuzzy score using:
+
+```text
+name similarity
+address similarity
+category similarity
+```
+
+This improves matching across inconsistent source formats.
+
+---
+
+# 18. Fuzzy Cluster Model
+
+After fuzzy match candidates were created, a cluster model was built:
+
+```text
+int_place_fuzzy_clusters_all_anchors
+```
+
+This model creates one logical place cluster per Chicago current active license record.
+
+It includes both:
+
+```text
+records that matched Yelp/OSM
+records that did not match any external source
+```
+
+This was important because the earlier fuzzy cluster model only included records that already had Yelp/OSM matches. That excluded active Chicago businesses with no external validation.
+
+The corrected all-anchor model includes:
+
+```text
+Chicago current active license + matched Yelp/OSM evidence if available
+Chicago current active license + no external match if unavailable
+```
+
+Important fields include:
+
+```text
+place_cluster_id
+canonical_business_name
+canonical_address
+matched_sources
+matched_source_count
+found_in_current_active_license
+found_in_yelp
+found_in_osm
+active_signal_count
+inactive_signal_count
+fuzzy_match_types
+concatenated_values
+cluster_strength
+preliminary_place_status
+matched_source_evidence
+```
+
+The `concatenated_values` column shows the actual fields used for matching, such as:
+
+```text
+NAME_MATCH
+ADDRESS_MATCH
+CITY_MATCH
+STATE_MATCH
+ZIP_MATCH
+NAME_SIMILARITY
+ADDRESS_SIMILARITY
+CATEGORY_SIMILARITY
+MATCH_SCORE
+MATCH_TYPE
+```
+
+This makes the fuzzy matching logic easier to validate manually.
+
+---
+
+# 19. Mart Layer
+
+The project currently has two main mart tables.
+
+```text
+models/marts/
+├── mart_place_status_summary.sql
+└── mart_place_change_detection.sql
+```
+
+These marts represent the business-ready layer of the project.
+
+---
+
+# 20. Mart: `mart_place_status_summary`
+
+The model:
+
+```text
+mart_place_status_summary
+```
+
+answers current place status questions.
+
+It uses:
+
+```text
+int_place_fuzzy_clusters_all_anchors
+```
+
+as input.
+
+This mart answers questions such as:
+
+- Is this place likely active?
+- Is it supported by OSM?
+- Is it supported by Yelp?
+- Is it officially active but missing external validation?
+- What confidence level should be assigned?
+- What recommended action should be taken?
+
+Important output columns include:
+
+```text
+place_cluster_id
+canonical_business_name
+canonical_address
+matched_sources
+found_in_yelp
+found_in_osm
+final_place_status
+confidence_level
+recommended_action
+concatenated_values
+matched_source_evidence
+```
+
+Example final statuses:
+
+| Final Status | Meaning |
+|---|---|
+| `officially_active_but_missing_external_sources` | The business is active in Chicago license data but has no Yelp/OSM match |
+| `likely_active_with_osm_support` | The business is active in Chicago license data and matched with OSM |
+| `likely_active_with_yelp_support` | The business is active in Chicago license data and matched with Yelp |
+| `verified_active` | The business has support from Chicago license, Yelp, and OSM |
+
+Example recommended actions:
+
+| Recommended Action | Meaning |
+|---|---|
+| `officially_active_but_missing_external_sources` | Keep the official active record but note missing external validation |
+| `active_but_missing_yelp_validation` | OSM supports the place, but Yelp evidence is missing |
+| `keep_active_with_yelp_support` | Yelp supports the official active license signal |
+| `approve_as_verified_active` | Multiple sources support active status |
+
+---
+
+# 21. Mart: `mart_place_change_detection`
+
+The model:
+
+```text
+mart_place_change_detection
+```
+
+uses the historical Chicago license data to detect business changes over time.
+
+It compares:
+
+```text
+historical business licenses
+current active licenses
+external Yelp/OSM listings
+```
+
+This mart answers questions such as:
+
+- Did this place change over time?
+- Did an old business close?
+- Did a new business replace an old business at the same address?
+- Does a business have historical continuity?
+- Are there multiple active or recent businesses at the same address?
+
+Important output columns include:
+
+```text
+place_change_id
+historical_business_name
+historical_address
+historical_license_status_code
+has_current_active_at_same_address
+same_business_still_active
+different_business_now_at_same_address
+replacement_business_name
+change_detection_status
+closure_signal
+replacement_signal
+external_staleness_signal
+confidence_level
+recommended_action
+evidence_summary
+```
+
+Example change detection statuses:
+
+| Change Detection Status | Meaning |
+|---|---|
+| `historical_business_likely_closed` | Historical business has no current active license at the same address |
+| `old_business_replaced_by_new_business` | A different current active business exists at the same address |
+| `business_has_historical_continuity` | Historical and current active records appear to describe the same business |
+| `same_address_has_multiple_active_or_recent_businesses_needs_review` | Same address has multiple signals and should be reviewed |
+| `change_status_unknown` | Signals are not strong enough for a clear decision |
+
+This mart makes the historical license dataset useful for closure and replacement detection.
+
+---
+
+# 22. Validation Queries
+
+A separate SQL validation file was created:
+
+```text
+validation_queries.sql
+```
+
+This file contains manual validation queries for:
+
+- Raw table row counts
+- Staging model row counts
+- Intermediate model row counts
+- Source distribution
+- Activity signal distribution
+- Fuzzy match type distribution
+- Fuzzy cluster validation
+- Active status mart validation
+- Change detection mart validation
+- Duplicate checks
+- Null checks
+- Sample RAG evidence records
+
+Example validation query:
+
+```sql
+select
+    final_place_status,
+    confidence_level,
+    recommended_action,
+    count(*) as row_count
+from mart_place_status_summary
+group by
+    final_place_status,
+    confidence_level,
+    recommended_action
+order by row_count desc;
+```
+
+Example change detection validation query:
+
+```sql
+select
+    change_detection_status,
+    closure_signal,
+    replacement_signal,
+    external_staleness_signal,
+    confidence_level,
+    recommended_action,
+    count(*) as row_count
+from mart_place_change_detection
+group by
+    change_detection_status,
+    closure_signal,
+    replacement_signal,
+    external_staleness_signal,
+    confidence_level,
+    recommended_action
+order by row_count desc;
+```
+
+These queries were used to confirm that the marts produced meaningful categories.
+
+---
+
+# 23. RAG Layer Overview
+
+After the dbt marts were completed, a RAG layer was added on top of the trusted Postgres outputs.
+
+The purpose of the RAG layer is not to replace the marts.
+
+Instead:
+
+```text
+Postgres marts = trusted structured evidence layer
+RAG = natural-language explanation and question-answering layer
+```
+
+The RAG system allows users to ask questions such as:
+
+```text
+Why is this place marked active but missing Yelp validation?
+Which businesses were replaced by new businesses?
+Why would a historical business be marked likely closed?
+Give me places that are officially active but missing external sources.
+```
+
+The RAG system uses the mart outputs as evidence.
+
+---
+
+# 24. RAG Evidence Document Generation
+
+The file:
+
+```text
+rag/build_evidence_documents.py
+```
+
+reads from the two mart tables:
+
+```text
+mart_place_status_summary
+mart_place_change_detection
+```
+
+It converts each row into an evidence document.
+
+Example evidence document from `mart_place_status_summary`:
+
+```text
+Document Type: Current Place Status
+Business Name: smith & wollensky
+Address: 318 n state st, chicago, IL 60654
+Final Place Status: likely_active_with_osm_support
+Confidence Level: medium_confidence
+Recommended Action: active_but_missing_yelp_validation
+Matched Sources: openstreetmap, chicago_current_active_license
+Evidence: NAME_MATCH, ADDRESS_MATCH, similarity scores, and match type
+```
+
+Example evidence document from `mart_place_change_detection`:
+
+```text
+Document Type: Place Change Detection
+Historical Business Name: aldi #32
+Historical Address: 1840 n clybourn ave, chicago, IL
+Change Detection Status: old_business_replaced_by_new_business
+Confidence Level: medium_confidence
+Recommended Action: mark_old_business_as_replaced
+Evidence Summary: historical business and replacement business at same address
+```
+
+The evidence documents are represented in Python using a dataclass:
+
+```python
+@dataclass
+class EvidenceDocument:
+    document_id: str
+    document_type: str
+    text: str
+    metadata: Dict[str, Any]
+```
+
+The dataclass is only a temporary in-memory structure. It does not store data permanently.
+
+---
+
+# 25. Local Vector Store with ChromaDB
+
+The file:
+
+```text
+rag/build_vector_store.py
+```
+
+converts evidence text into embeddings and stores them in a local ChromaDB vector store.
+
+The flow is:
+
+```text
+Postgres mart rows
+   ↓
+Evidence text documents
+   ↓
+Embedding model converts text to vectors
+   ↓
+ChromaDB stores vectors, text, and metadata locally
+```
+
+The vector store is stored locally at:
+
+```text
+data/vector_store/chroma
+```
+
+This folder contains ChromaDB internal files such as:
+
+```text
+chroma.sqlite3
+data_level0.bin
+header.bin
+index_metadata.pickle
+length.bin
+link_lists.bin
+```
+
+These files represent the local vector database and similarity search index.
+
+The vector store folder is ignored by Git using:
+
+```gitignore
+data/vector_store/
+```
+
+---
+
+# 26. Embedding Model
+
+The project uses a local Hugging Face sentence-transformer embedding model:
+
+```text
+sentence-transformers/all-MiniLM-L6-v2
+```
+
+This model converts evidence text into numerical vectors.
+
+Example:
+
+```text
+"Business is active in Chicago license and matched with OSM"
+```
+
+becomes a vector like:
+
+```text
+[0.012, -0.331, 0.872, ...]
+```
+
+These vectors allow semantic search.
+
+The embedding model does not generate answers. It only converts text into meaning-based numerical representations.
+
+---
+
+# 27. Dense Vector Retrieval
+
+The file:
+
+```text
+rag/query_vector_store.py
+```
+
+performs dense vector retrieval.
+
+The retrieval flow is:
+
+```text
+User question
+   ↓
+Question converted into embedding
+   ↓
+ChromaDB compares question vector with stored evidence vectors
+   ↓
+Top matching evidence documents are returned
+```
+
+This allows the system to retrieve evidence based on meaning, not only exact keyword matching.
+
+Example question:
+
+```text
+Why is a place marked active but missing Yelp validation?
+```
+
+The retriever returned evidence where:
+
+```text
+recommended_action = active_but_missing_yelp_validation
+matched_sources = openstreetmap, chicago_current_active_license
+```
+
+This confirmed that dense vector retrieval was working.
+
+---
+
+# 28. Hybrid Search: Dense Search + BM25 + Reciprocal Rank Fusion
+
+After dense retrieval was tested, hybrid search was added using:
+
+```text
+rag/hybrid_query.py
+```
+
+The hybrid search combines:
+
+```text
+Dense vector search
+BM25 keyword search
+Reciprocal Rank Fusion
+```
+
+## Dense Vector Search
+
+Dense search finds semantically similar evidence.
+
+It is useful for questions like:
+
+```text
+Why does this business look stale?
+Which places may have changed?
+```
+
+## BM25 Keyword Search
+
+BM25 stands for:
+
+```text
+Best Matching 25
+```
+
+It is a keyword-based ranking algorithm.
+
+BM25 is useful for exact terms such as:
+
+```text
+ALDI #32
+Smith & Wollensky
+60654
+Yelp
+replacement
+```
+
+## Reciprocal Rank Fusion
+
+Reciprocal Rank Fusion combines the ranking results from dense search and BM25.
+
+Documents that rank highly in both search methods receive stronger final rankings.
+
+The RRF score is based on:
+
+```text
+1 / (k + rank)
+```
+
+This avoids manually assigning fixed weights such as 40% BM25 and 60% vector search.
+
+The hybrid retrieval flow is:
+
+```text
+User question
+   ↓
+Dense vector search
+   ↓
+BM25 keyword search
+   ↓
+Reciprocal Rank Fusion
+   ↓
+Top evidence documents
+```
+
+This improves retrieval quality for both semantic and exact lookup questions.
+
+---
+
+# 29. Groq LLM Answer Layer
+
+The file:
+
+```text
+rag/rag_answer.py
+```
+
+adds a Groq LLM response layer on top of hybrid retrieval.
+
+The flow is:
+
+```text
+User question
+   ↓
+Hybrid search retrieves evidence
+   ↓
+Retrieved evidence is passed to Groq
+   ↓
+Groq generates a natural-language answer
+```
+
+The Groq API key and model name are stored in `.env`:
+
+```env
+GROQ_API_KEY=your_groq_api_key_here
+GROQ_MODEL=your_selected_groq_model_here
+```
+
+The code fully depends on `.env` and does not hardcode the Groq model name.
+
+The system prompt instructs the model to:
+
+- Use only retrieved evidence
+- Avoid inventing facts
+- Explain in simple business language
+- Mention status, confidence, recommended action, and evidence
+- Cite evidence document numbers and relevant details
+- Clearly say when evidence is not enough
+
+This makes the RAG output more trustworthy and grounded.
+
+---
+
+# 30. Current RAG Architecture
+
+The current local RAG architecture is:
+
+```text
+Postgres marts
+   ↓
+Evidence document generation
+   ↓
+Sentence-transformer embeddings
+   ↓
+Local ChromaDB vector store
+   ↓
+Dense vector retrieval
+   ↓
+BM25 keyword retrieval
+   ↓
+Reciprocal Rank Fusion
+   ↓
+Groq LLM answer generation
+```
+
+Current RAG files:
+
+| File | Purpose |
+|---|---|
+| `rag/build_evidence_documents.py` | Reads Postgres marts and creates evidence text |
+| `rag/build_vector_store.py` | Converts evidence text into embeddings and stores them in ChromaDB |
+| `rag/query_vector_store.py` | Tests dense vector retrieval from ChromaDB |
+| `rag/hybrid_query.py` | Performs hybrid retrieval using dense search, BM25, and RRF |
+| `rag/rag_answer.py` | Uses hybrid retrieval and Groq to generate natural-language answers |
+
+---
+
+# 31. Environment Variables
+
+The project uses `.env` for configuration.
+
+Example `.env` values:
+
+```env
+POSTGRES_HOST=127.0.0.1
+POSTGRES_PORT=5433
+POSTGRES_DB=place_intel
+POSTGRES_USER=place_user
+POSTGRES_PASSWORD=place_password
+
+GROQ_API_KEY=your_groq_api_key_here
+GROQ_MODEL=your_selected_groq_model_here
+```
+
+The `.env` file should not be committed to GitHub.
+
+A safe `.env.example` file can be committed with placeholder values.
+
+---
+
+# 32. Example RAG Questions
+
+The current RAG system can answer questions such as:
+
+```text
+Why is a place marked active but missing Yelp validation?
+```
+
+```text
+Give me 2 places which have change of place.
+```
+
+```text
+Why was ALDI #32 marked as replaced?
+```
+
+```text
+Give me places that are officially active but missing external sources.
+```
+
+```text
+Why would a historical business be marked likely closed?
+```
+
+```text
+Give me evidence for Smith & Wollensky.
+```
+
+---
+
+# 33. Current End-to-End Pipeline
+
+The full implemented pipeline is now:
+
+```text
+Raw CSV / JSON / GeoJSON files
+   ↓
+Python ingestion scripts
+   ↓
+PostgreSQL raw tables
+   ↓
+dbt staging models
+   ↓
+dbt intermediate cleaned models
+   ↓
+Unified evidence table
+   ↓
+Fuzzy matching and clustering
+   ↓
+dbt mart tables
+   ↓
+Evidence document generation
+   ↓
+Embedding generation
+   ↓
+Local ChromaDB vector store
+   ↓
+Hybrid search
+   ↓
+Groq-powered RAG answer generation
+```
+
+---
+
+# 34. Current Project Status
+
+Completed:
+
+- Dockerized PostgreSQL setup
+- Adminer browser-based database access
+- Raw data ingestion into PostgreSQL
+- dbt project setup
+- dbt staging models
+- dbt intermediate cleaned models
+- Unified evidence table
+- Fuzzy matching using `pg_trgm`
+- All-anchor fuzzy cluster model
+- Active status mart
+- Change detection mart
+- Validation SQL file
+- Evidence document generation
+- Local ChromaDB vector store
+- Dense vector retrieval
+- Hybrid retrieval using BM25 and Reciprocal Rank Fusion
+- Groq-based RAG answer generation
+
+---
+
+# 35. Next Planned Steps
+
+The next planned steps are:
+
+1. Add or improve dbt tests and documentation.
+2. Add `.env.example`.
+3. Add a FastAPI endpoint for RAG question answering.
+4. Optionally build a simple Streamlit UI.
+5. Later, consider adding Google Maps API as an enrichment source or live agent tool.
+6. For cloud deployment, evaluate Cloud SQL + pgvector, Vertex AI Vector Search, or Chroma Cloud.
+
+The current local system is sufficient for development and portfolio demonstration.
