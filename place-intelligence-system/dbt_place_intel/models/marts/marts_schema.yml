@@ -1,0 +1,70 @@
+version: 2
+
+models:
+  - name: mart_place_status_summary
+    description: "Final mart that summarizes current active place status using Chicago current active licenses, Yelp, and OpenStreetMap evidence."
+    columns:
+      - name: place_cluster_id
+        description: "Unique identifier for a grouped place cluster."
+        data_tests:
+          - not_null
+          - unique
+
+      - name: canonical_business_name
+        description: "Canonical cleaned business name for the place."
+        data_tests:
+          - not_null
+
+      - name: canonical_address
+        description: "Canonical cleaned address for the place."
+        data_tests:
+          - not_null
+
+      - name: final_place_status
+        description: "Final status assigned to the place."
+        data_tests:
+          - not_null
+
+      - name: confidence_level
+        description: "Confidence level for the assigned place status."
+        data_tests:
+          - not_null
+
+      - name: recommended_action
+        description: "Recommended action based on source evidence."
+        data_tests:
+          - not_null
+
+  - name: mart_place_change_detection
+    description: "Final mart that detects historical business closures, replacements, continuity, and review-needed cases."
+    columns:
+      - name: place_change_id
+        description: "Unique identifier for a historical place change detection record."
+        data_tests:
+          - not_null
+          - unique
+
+      - name: historical_business_name
+        description: "Business name from historical Chicago license records."
+        data_tests:
+          - not_null
+
+      - name: historical_address
+        description: "Historical business address used for change comparison."
+        data_tests:
+          - not_null
+
+      - name: change_detection_status
+        description: "Final change detection category."
+        data_tests:
+          - not_null
+
+      - name: confidence_level
+        description: "Confidence level for the change detection output."
+        data_tests:
+          - not_null
+
+      - name: recommended_action
+        description: "Recommended action based on closure, replacement, continuity, or review signals."
+        data_tests:
+          - not_null
