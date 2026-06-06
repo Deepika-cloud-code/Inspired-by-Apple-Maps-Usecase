@@ -10,6 +10,11 @@ services:
       - "5433:5432"
     volumes:
       - place_intel_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U place_user -d place_intel"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   adminer:
     image: adminer
@@ -28,11 +33,12 @@ services:
     ports:
       - "8081:8081"
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     command: >
-      sh -c "pip install dbt-postgres &&
-             dbt docs generate --profiles-dir . &&
-             dbt docs serve --profiles-dir . --host 0.0.0.0 --port 8081"
+      sh -c "pip install --no-cache-dir dbt-core==1.11.9 dbt-postgres==1.10.0 &&
+             dbt docs generate --profiles-dir . --target docker &&
+             dbt docs serve --profiles-dir . --target docker --host 0.0.0.0 --port 8081 --no-browser"
 
 volumes:
   place_intel_pgdata:
