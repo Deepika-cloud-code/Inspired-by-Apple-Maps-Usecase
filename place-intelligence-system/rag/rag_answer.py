@@ -4,7 +4,7 @@ from typing import Any, Dict, List
 from dotenv import load_dotenv
 from groq import Groq
 
-from hybrid_query import hybrid_search
+from rag.hybrid_query import hybrid_search
 
 
 load_dotenv()
