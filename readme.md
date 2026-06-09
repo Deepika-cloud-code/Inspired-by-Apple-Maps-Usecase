@@ -1799,3 +1799,7 @@ The next planned steps are:
 6. For cloud deployment, evaluate Cloud SQL + pgvector, Vertex AI Vector Search, or Chroma Cloud.
 
 The current local system is sufficient for development and portfolio demonstration.
+
+# Guardrails
+
+Added guardrails: input(domain), output(starter code), retreival(starter code)
