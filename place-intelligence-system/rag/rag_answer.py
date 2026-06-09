@@ -6,6 +6,10 @@ from groq import Groq
 
 from rag.hybrid_query import hybrid_search
 
+from rag.guardrails.input_guardrails import validate_place_intelligence_question
+from rag.guardrails.output_guardrails import validate_output_answer
+from rag.guardrails.retrieval_guardrails import validate_retrieved_evidence
+
 
 load_dotenv()
 
@@ -65,6 +69,8 @@ Rules:
 6. If multiple evidence documents support the answer, summarize the common pattern and cite 2-3 examples.
 7. If the retrieved evidence is only partially relevant, say that clearly.
 8. Keep the answer concise, clear, and useful.
+9. If the user asks a question outside the Place Intelligence System, do not answer it.
+10. Do not answer general knowledge, coding, personal, health, finance, sports, politics, or unrelated questions.
 """.strip()
 
     user_prompt = f"""
@@ -89,28 +95,7 @@ Answer the user's question using only the retrieved evidence.
 
     return response.choices[0].message.content
 
-
-def answer_question(question: str, top_k: int = 5) -> Dict[str, Any]:
-    if not question or question.strip() == "":
-        raise ValueError("Question cannot be empty.")
-
-    results = hybrid_search(
-        question=question,
-        dense_top_k=15,
-        bm25_top_k=15,
-        final_top_k=top_k,
-    )
-
-    if not results:
-        return {
-            "question": question,
-            "answer": "No matching evidence was found in the vector store.",
-            "evidence": [],
-        }
-
-    context = build_context_from_hybrid_results(results)
-    answer = generate_answer_with_groq(question=question, context=context)
-
+def build_evidence_payload(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     evidence = []
 
     for index, result in enumerate(results, start=1):
@@ -129,10 +114,71 @@ def answer_question(question: str, top_k: int = 5) -> Dict[str, Any]:
             }
         )
 
+    return evidence
+
+
+def answer_question(question: str, top_k: int = 5) -> Dict[str, Any]:
+    input_guardrail = validate_place_intelligence_question(question)
+
+    if not input_guardrail.is_allowed:
+        return {
+            "question": question,
+            "answer": input_guardrail.message,
+            "evidence": [],
+            "guardrails": {
+                "input": input_guardrail.status,
+                "retrieval": "not_run",
+                "output": "not_run",
+            },
+        }
+
+    results = hybrid_search(
+        question=question,
+        dense_top_k=15,
+        bm25_top_k=15,
+        final_top_k=top_k,
+    )
+
+    retrieval_guardrail = validate_retrieved_evidence(results)
+
+    if not retrieval_guardrail.is_allowed:
+        return {
+            "question": question,
+            "answer": retrieval_guardrail.message,
+            "evidence": [],
+            "guardrails": {
+                "input": input_guardrail.status,
+                "retrieval": retrieval_guardrail.status,
+                "output": "not_run",
+            },
+        }
+
+    context = build_context_from_hybrid_results(results)
+    answer = generate_answer_with_groq(question=question, context=context)
+
+    output_guardrail = validate_output_answer(answer)
+
+    if not output_guardrail.is_allowed:
+        return {
+            "question": question,
+            "answer": output_guardrail.message,
+            "evidence": build_evidence_payload(results),
+            "guardrails": {
+                "input": input_guardrail.status,
+                "retrieval": retrieval_guardrail.status,
+                "output": output_guardrail.status,
+            },
+        }
+
     return {
         "question": question,
         "answer": answer,
-        "evidence": evidence,
+        "evidence": build_evidence_payload(results),
+        "guardrails": {
+            "input": input_guardrail.status,
+            "retrieval": retrieval_guardrail.status,
+            "output": output_guardrail.status,
+        },
     }
 
 
@@ -141,6 +187,11 @@ def print_answer(response: Dict[str, Any]) -> None:
     print("QUESTION")
     print("=" * 100)
     print(response["question"])
+
+    print("\n" + "=" * 100)
+    print("GUARDRAILS")
+    print("=" * 100)
+    print(response.get("guardrails", {}))
 
     print("\n" + "=" * 100)
     print("ANSWER")
